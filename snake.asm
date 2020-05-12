@@ -73,29 +73,51 @@ main proc
 	call init_game
 	
 	@@game_loop:
-		mov al, [current_game_state]
+		call check_end_rule
 		cmp al, 0
-		jnz @@end_loop
+		jg @@end_loop
 		
 		call handle_all_keys
 		
 		mov al, [handle_tick]
-		cmp al, 1
-		jz @@tick
+		cmp al, 0
+		jnz @@tick
 		hlt
 		jmp @@game_loop
 		
-		@@tick:
+	@@tick:
+		call update_game_on_tick
+		
+		cmp al, byte ptr[skip_update]
+		jl @@game_loop
+		
 		xor al, al
 		mov [handle_tick], al
 		
+		mov al, [on_pause]
+		cmp al, 1
+		jz @@after_update
 		call update_snake
+	@@after_update:
+		
 		call draw_window
 		
 		jmp @@game_loop
 		
 @@end_loop:
+	cmp al, state_hard_leave
+	jz @@end
 	
+	;показ результатов
+	
+	@@loop:
+		call handle_all_keys
+		mov al, [current_game_state]
+		cmp al, state_hard_leave
+	jnz @@loop
+		
+	
+@@end:
 	call revert_int_handlers
 	
 	pop ax
@@ -132,6 +154,24 @@ init_game proc
 	push cx
 	push dx
 	push si
+	
+	call srandsystime
+	
+	mov dx, 0101h
+	call add_coordinate_to_buffer
+	mov dx, 0202h
+	call add_coordinate_to_buffer
+	mov dx, 0303h
+	call add_coordinate_to_buffer
+	mov ax, 0
+	call remove_coordinate_from_buffer
+	mov ax, 1
+	call remove_coordinate_from_buffer
+	mov ax, 0
+	call remove_coordinate_from_buffer
+	
+	mov al, start_skip_upd
+	mov [skip_update], al
 	
 	mov dx, 0000h
 	mov cx, game_field_height
@@ -176,13 +216,11 @@ init_game proc
 	mov al, 1
 	call add_snake_head
 	call add_snake_seg
-	call add_snake_seg
 	mov al, 2
 	call set_head_dir
 	call add_snake_seg
-	call move_snake
-	mov al, 1
-	call set_head_dir		;начальное положение змейки
+	call add_snake_seg
+	call move_snake			;начальное положение змейки
 	
 	xor al, al
 	call set_snake_on_field
@@ -190,17 +228,18 @@ init_game proc
 	call get_snake_dir
 	mov [changed_direction], al
 	
+	xor ch, ch
+	mov cl, [started_add_seg]
 	mov al, cdAddSeg
-	mov dx, 080Ah
-	call set_field_cell
-	mov dx, 1015h
-	call set_field_cell
-	mov dx, 1111h
-	call set_field_cell		;начальный спавн яблок
+	call spawn_ardtefacts
 	
+	mov cl, [started_damage]
+	mov al, cdDamage
+	call spawn_ardtefacts
+	
+	mov cl, [started_dead]
 	mov al, cdDead
-	mov dx, 0219h
-	call set_field_cell
+	call spawn_ardtefacts	;начальный спавн артефактов
 	
 	call draw_game_field
 	
@@ -210,6 +249,56 @@ init_game proc
 	pop ax
 	ret
 init_game endp
+
+spawn_ardtefacts proc	;al - код артефакта, cx - количество артефактов
+	push cx
+	
+	cmp cx, 0
+	jz @@end
+	
+	@@loop:
+		call set_random_game_sell
+	loop @@loop
+	
+@@end:
+	pop cx
+	ret
+spawn_ardtefacts endp
+
+check_end_rule proc		;al - текущее состояние игры
+	push bx
+	
+	mov al, [current_game_state]
+	cmp al, state_continue
+	jg @@end
+	
+	mov bl, [current_len_snake]
+	cmp bl, 0
+	jnz @@next
+	
+	mov al, state_lose
+	jmp @@end
+	
+@@next:
+	cmp bl, max_len_snake
+	jnz @@end
+	
+	mov al, state_win
+	
+@@end:
+	pop bx
+	ret
+check_end_rule endp
+
+update_game_on_tick proc
+	push ax
+	
+	xor al, al
+	mov [is_updated_on_cur_tick], al
+	
+	pop ax
+	ret
+update_game_on_tick endp
 
 convert_to_field proc	;dl,dh - позиция на поле; ВЫХОД: di - указатель на эл. на поле
 	push ax
@@ -253,7 +342,158 @@ game_field_width equ 32
 game_field_height equ 25
 game_field db game_field_width * game_field_height dup(0)			  
 
-;===================END_MAIN_LOGIC==========================
+;====================END_MAIN_LOGIC=========================
+;==================RANDOM_FIELD_CELL========================
+
+set_random_game_sell proc		;al - код добавляемого объекта
+	push ax
+	push bx
+	push dx
+	
+	mov bl, al
+	
+	mov al, [is_updated_on_cur_tick]
+	cmp al, 1
+	jz @@next
+	call fill_buffer_with_empty_cells
+@@next:
+	
+	mov ax, [len_game_sells]
+	cmp ax, 0
+	jz @@end
+	
+	call randint
+	call get_coordinate_from_buffer
+	call remove_coordinate_from_buffer
+	mov al, bl
+	call set_field_cell
+	
+@@end:
+	pop dx
+	pop bx
+	pop ax
+	ret
+set_random_game_sell endp
+
+fill_buffer_with_empty_cells proc
+	push ax
+	push dx
+	
+	call clear_sells_buffer
+	xor dx, dx
+	
+	@@loop:
+		call get_field_cell
+		cmp al, cdEmpty
+		jnz @@continue
+		
+		call add_coordinate_to_buffer
+	
+	@@continue:
+		inc dl
+		cmp dl, game_field_width
+		jnz @@loop
+		xor dl, dl
+		inc dh
+		cmp dh, game_field_height
+	jnz @@loop
+	
+	mov al, 1
+	mov [is_updated_on_cur_tick], al
+	
+	pop dx
+	pop ax
+	ret
+fill_buffer_with_empty_cells endp
+
+add_coordinate_to_buffer proc		;dl,dh - координаты клетки
+	push ax
+	push si
+	
+	mov ax, [len_game_sells]
+	call get_pointer_on_cell
+	mov [si], dl
+	mov [si + 1], dh
+	inc [len_game_sells]
+	
+	pop si
+	pop ax
+	ret
+add_coordinate_to_buffer endp
+
+remove_coordinate_from_buffer proc	;ax - номер в массиве
+	push ax
+	push si
+	
+	call get_pointer_on_cell
+	
+	xor al, al
+	mov [si], al
+	mov [si + 1], al
+	add si, size_struct_sell
+	
+	@@loop:
+		mov al, [si]
+		mov ah, [si + 1]
+		cmp al, 0
+		jnz @@next
+		cmp ah, 0
+		jnz @@next
+		jmp @@end
+	@@next:
+		mov [si - 2], al
+		mov [si - 1], ah
+		xor al, al
+		mov [si], al
+		mov [si + 1], al
+		add si, size_struct_sell
+	jmp @@loop
+@@end:
+	dec [len_game_sells]
+	pop si
+	pop ax
+	ret
+remove_coordinate_from_buffer endp
+
+clear_sells_buffer proc
+	push ax
+	
+	xor ax, ax
+	mov [len_game_sells], ax
+	
+	pop ax
+	ret
+clear_sells_buffer endp
+
+get_coordinate_from_buffer proc		;ax - номер в массиве; ВЫХОД: dl,dh - координаты
+	push si
+	
+	call get_pointer_on_cell
+	mov dl, [si]
+	mov dh, [si + 1]
+	
+	pop si
+	ret
+get_coordinate_from_buffer endp
+
+get_pointer_on_cell proc	;ax - номер в массиве; ВЫХОД: si - указатель на координаты
+	push ax
+	
+	shl ax, 1
+	mov si, offset sells_buffer
+	add si, ax
+
+	pop ax
+	ret
+get_pointer_on_cell endp
+
+size_struct_sell equ 2
+is_updated_on_cur_tick db 0
+len_game_sells dw 0
+sells_buffer db size_struct_sell * game_field_width * game_field_height dup(0)
+empty_sells db 0, 0
+
+;================END_RANDOM_FIELD_CELL======================
 ;========================SNAKE==============================
 
 update_snake proc
@@ -378,13 +618,62 @@ add_snake_head proc		;dl,dh - координаты головы, al - напра
 	ret
 add_snake_head endp
 
+remove_last_seg proc
+	push ax
+	push si
+	
+	mov al, [current_len_snake]
+	cmp al, 0
+	jz @@end
+	
+	call get_pointer_on_last_seg
+	xor al, al
+	mov [si], al
+	mov [si + 1], al
+	mov [si + 2], al
+	dec [current_len_snake]
+	
+@@end:
+	pop si
+	pop ax
+	ret
+remove_last_seg endp
+
+remove_from_seg proc 	;cl - с какого сегмента удалять элементы
+	push cx
+	
+	mov ch, [current_len_snake]
+	cmp cl, ch
+	jz @@end
+	
+	inc cl
+	
+	@@loop:
+		mov ch, [current_len_snake]
+		cmp cl, ch
+		jz @@end
+		call remove_last_seg
+	jmp @@loop
+	
+@@end:
+	pop cx
+	ret
+remove_from_seg endp
+
 set_head_dir proc		;al - направление движения
+	push ax
 	push di
+	
+	mov ah, [current_len_snake]
+	cmp ah, 0
+	jz @@end
 	
 	mov di, offset snake_array
 	mov [di + 2], al
 	
+@@end:
 	pop di
+	pop ax
 	ret
 set_head_dir endp
 
@@ -429,11 +718,14 @@ get_pointer_on_seg proc		;al - номер сегмента; ВЫХОД: si - у�
 	ret
 get_pointer_on_seg endp
 
-get_pointer_on_last_seg proc
+get_pointer_on_last_seg proc	;ВЫХОД: si - указатель на последний сегмент
 	push ax
 	
 	mov al, [current_len_snake]
+	cmp al, 0
+	jz @@next
 	dec al
+@@next:
 	call get_pointer_on_seg
 	
 	pop ax
@@ -445,6 +737,10 @@ set_snake_on_field proc		;ah (0 - рисовать змейку, 1 - затер�
 	push cx
 	push dx
 	push si
+	
+	mov al, [current_len_snake]
+	cmp al, 0
+	jz @@end
 	
 	call get_pointer_on_last_seg
 	cmp ah, 0
@@ -488,6 +784,37 @@ get_snake_dir proc		;al - направление движения змейки
 	ret
 get_snake_dir endp
 
+get_num_snake_seg_by_coord proc		;dl,dh - координаты сегмента; ВЫХОД: cl - номер сегмента, ch - не сохраняется
+	push bx
+	push dx
+	push si
+	
+	mov si, offset snake_array
+	xor cx, cx
+	mov ch, [current_len_snake]
+	
+	@@loop:
+		cmp cl, ch
+		jz @@end
+		mov bl, [si]
+		mov bh, [si + 1]
+		cmp bl, dl
+		jnz @@next
+		cmp bh, dh
+		jnz @@next
+		jmp @@end
+	@@next:
+		add si, size_snake_elem
+		inc cl
+		jmp @@loop
+	
+@@end:
+	pop si
+	pop dx
+	pop bx
+	ret
+get_num_snake_seg_by_coord endp
+
 
 max_len_snake equ 30
 size_snake_elem equ 3
@@ -528,6 +855,7 @@ cdWallTeleport	equ 3
 cdSnakeBody		equ 4
 cdSnakeHead		equ 5
 cdAddSeg		equ 6
+cdDamage		equ 7
 cdDead			equ 8
 
 entTable dw cdEmpty, offset draw_empty, 0
@@ -538,6 +866,7 @@ entTable dw cdEmpty, offset draw_empty, 0
 		 dw cdSnakeHead, offset draw_snake_head, 0
 		 dw cdAddSeg, offset draw_add_seg, offset inter_add_seg
 		 dw cdDead, offset draw_dead, offset inter_wall_voltage
+		 dw cdDamage, offset draw_damage, offset inter_damage
 		 dw	0FFFFh, 0, 0
 
 ;==================END_GAME_ENTITIES========================
@@ -722,6 +1051,31 @@ draw_add_seg proc
 	ret
 draw_add_seg endp
 
+draw_damage proc
+	push ax
+	push bx
+	
+	mov ax, 05005h
+	mov bx, 04001h
+	call draw_two_line
+	
+	mov ax, 04001h
+	mov bx, 01004h
+	call draw_two_line
+	
+	mov ax, 0A41Bh
+	mov bx, 0A41Eh
+	call draw_two_line
+	
+	mov ax, 0A96Ah
+	mov bx, 05555h
+	call draw_two_line
+	
+	pop bx
+	pop ax
+	ret
+draw_damage endp
+
 draw_dead proc
 	push ax
 	push bx
@@ -752,7 +1106,7 @@ draw_dead endp
 ;ВЫХОД: al - нужно ли перемещать (0 - нужно, 1 - нет)
 
 inter_wall_voltage proc
-	mov al, 1
+	mov al, state_lose
 	mov [current_game_state], al
 	ret
 inter_wall_voltage endp
@@ -794,7 +1148,23 @@ inter_snake_body proc
 	mov al, [mode_intersection_with_yourself]
 	cmp al, 0
 	jz @@end
+	cmp al, 2
+	jz @@cut
+	mov al, state_lose
 	mov [current_game_state], al
+	jmp @@end
+@@cut:
+	push ax
+	push cx
+	push dx
+	mov ah, 1
+	call set_snake_on_field
+	call get_cell_front_head
+	call get_num_snake_seg_by_coord
+	call remove_from_seg
+	pop dx
+	pop cx
+	pop ax
 @@end:
 	xor al, al
 	ret
@@ -802,9 +1172,21 @@ inter_snake_body endp
 
 inter_add_seg proc
 	call add_snake_seg
+	mov al, cdAddSeg
+	call set_random_game_sell
 	mov al, 1
 	ret
 inter_add_seg endp
+
+inter_damage proc
+	push ax
+	mov ah, 1
+	call set_snake_on_field
+	call remove_last_seg
+	pop ax
+	xor al, al
+	ret
+inter_damage endp
 
 ;==============END_INTERSECTION_HANDLERS====================
 ;========================VIEW===============================
@@ -947,16 +1329,19 @@ get_handler_key proc 	;al - код кнопки; ВЫХОД: bx - обработ
 get_handler_key endp
 
 keyTable 	dw 1, offset end_key_handler
-			dw 200, offset change_snake_dir_up
-			dw 208, offset change_snake_dir_down
-			dw 203, offset change_snake_dir_left
-			dw 205, offset change_snake_dir_right
+			dw 145, offset change_snake_dir_up
+			dw 159, offset change_snake_dir_down
+			dw 158, offset change_snake_dir_left
+			dw 160, offset change_snake_dir_right
+			dw 185, offset set_on_off_pause
+			dw 179, offset reduce_game_speed
+			dw 180, offset increase_game_speed
 			dw 0FFFFh, 0
 			
 end_key_handler proc
 	push ax
 	
-	mov al, 1
+	mov al, state_hard_leave
 	mov [current_game_state], al
 	
 	pop ax
@@ -990,6 +1375,41 @@ change_snake_dir_right proc
 	pop ax
 	ret
 change_snake_dir_right endp
+
+set_on_off_pause proc
+	push ax
+	
+	mov al, [on_pause]
+	xor al, 1
+	mov [on_pause], al
+
+	pop ax
+	ret
+set_on_off_pause endp
+
+reduce_game_speed proc
+	push ax
+	
+	mov al, [skip_update]
+	cmp al, max_skip_upd
+	jz @@end
+	inc [skip_update]
+@@end:
+	pop ax
+	ret
+reduce_game_speed endp
+
+increase_game_speed proc
+	push ax
+	
+	mov al, [skip_update]
+	cmp al, min_skip_upd
+	jz @@end
+	dec [skip_update]
+@@end:
+	pop ax
+	ret
+increase_game_speed endp
 
 ;================END_KEYBOARD_HANDLERS======================
 ;=======================BUFFER==============================
@@ -1177,8 +1597,7 @@ int08 proc
 @@handle:
 	xor al, al
 	mov cs:[counter], al
-	inc al
-	mov cs:[handle_tick], al
+	inc cs:[handle_tick]
 @@next:
 	pop ax
 	db	0eah
@@ -1273,7 +1692,11 @@ parse_str_to_int proc	;si - указатель на начало строки, b
 		
 		sub bh, '0'
 		mul bl
+		jc @@empty_int
+		jo @@empty_int
 		add al, bh
+		jc @@empty_int
+		jo @@empty_int
 		inc si
 		jmp @@loop
 	
@@ -1284,7 +1707,7 @@ parse_str_to_int proc	;si - указатель на начало строки, b
 	ret
 parse_str_to_int endp
 
-parse_int_to_str proc	;ax - число, bl - СС, di - место, куда будет записано число
+parse_int_to_str proc	;ax - число, bl - СС, di - место, куда будет записано число, flag C = 1, если произошла ошибка
 	push ax
 	push di
 	
@@ -1337,8 +1760,56 @@ offset_coordinate proc
 	ret
 offset_coordinate endp
 
-;=========================END TOOLS========================
-;=========================PARSE ARGS=======================
+;=========================END_TOOLS========================
+;==========================RANDOM==========================
+ 
+srandsystime proc
+    push ax
+	push cx
+	push dx
+	
+    xor ax, ax          ;получение системного времени CX:DX
+    int 1ah
+    mov [seed], dx
+    
+	pop dx
+	pop cx
+	pop ax
+    ret
+srandsystime endp
+ 
+randint proc    ;ax - максимальная граница; ВЫХОД: ax - случайное число от 0 до ax
+	push cx
+	push dx
+	push ax
+	
+    mov ax, 25173           ; LCG мультипликатор
+    mul word ptr [seed]
+    add ax, 13849
+    mov [seed], ax
+    ; AX = (мультипликатор * seed + инскримент) % 65536
+   
+	pop cx
+	cmp cx, 0
+	jnz @@next
+	xor ax, ax
+	jmp @@end
+	
+@@next:
+	xor dx, dx
+	div cx
+	mov ax, dx
+   
+@@end:
+	pop dx
+	pop cx
+	ret
+randint endp
+
+seed dw 11
+
+;========================END_RANDOM========================
+;========================PARSE_ARGS========================
 
 end_with_err proc	;al - код ошибки
 	push ax
@@ -1377,6 +1848,7 @@ parse_args proc
 		cmp bl, '-'
 		jz @@read_arg
 		
+		@@parse_err:
 		mov al, 01h
 		call end_with_err
 		
@@ -1385,7 +1857,7 @@ parse_args proc
 			mov bl, [si]
 
 			cmp bl, 0dh
-			jz end_with_err
+			jz @@parse_err
 			
 			jmp @@parse_letter
 			
@@ -1397,6 +1869,21 @@ parse_args proc
 			call intersection
 			jmp @@args
 			
+			@@add_seg_art:
+			mov ax, offset started_add_seg
+			call set_start_art
+			jmp @@args
+			
+			@@damage_art:
+			mov ax, offset started_damage
+			call set_start_art
+			jmp @@args
+			
+			@@dead_art:
+			mov ax, offset started_dead
+			call set_start_art
+			jmp @@args
+			
 			@@parse_letter:
 			cmp bl, 'h'
 			jz @@help
@@ -1406,6 +1893,18 @@ parse_args proc
 			jz @@intersection
 			cmp bl, 'I'
 			jz @@intersection
+			cmp bl, 'a'
+			jz @@add_seg_art
+			cmp bl, 'A'
+			jz @@add_seg_art
+			cmp bl, 'l'
+			jz @@damage_art
+			cmp bl, 'L'
+			jz @@damage_art
+			cmp bl, 'd'
+			jz @@dead_art
+			cmp bl, 'D'
+			jz @@dead_art
 			
 			mov al, 02h
 			call end_with_err
@@ -1434,12 +1933,13 @@ help endp
 
 intersection proc	;si - байт перед пробелом и параметром
 	push ax
+	push bx
 	
 	add si, 2
-	mov al, [si]
-	cmp al, '0'
-	jl @@err
-	cmp al, '1'
+	mov bl, 10
+	call parse_str_to_int
+	jc @@err
+	cmp al, 2
 	jg @@err
 	jmp @@next
 	
@@ -1448,18 +1948,45 @@ intersection proc	;si - байт перед пробелом и параметр
 	call end_with_err
 	
 @@next:
-	sub al, '0'
 	mov [mode_intersection_with_yourself], al
-	inc si
 	
+	pop bx
 	pop ax
 	ret
 intersection endp
 
+set_start_art proc		;ax - место, куда записывать
+	push ax
+	push bx
+	push di
+	
+	mov di, ax
+	
+	add si, 2
+	mov bl, 10
+	call parse_str_to_int
+	jnc @@next
+	
+	mov al, 3
+	call end_with_err
+	
+@@next:
+	mov [di], al
+	
+	pop di
+	pop bx
+	pop ax
+	ret
+set_start_art endp
+
 ;АРГУМЕНТЫ КОМАНДНОЙ СТРОКИ===============================
-;Последний код ошибки: 03h
+;Последний код ошибки: 04h
+;01 - 
 
 mode_intersection_with_yourself db 0
+started_add_seg db 1
+started_damage db 0
+started_dead db 0
 
 ;ГЛОМАБЛЬНЫЕ ПАРАМЕТРЫ====================================
 background_color equ 0
@@ -1467,13 +1994,23 @@ graph_buffer equ 0B800h
 work_mode equ 04h
 work_page equ 0
 draw_width equ 80
-skip_ticks_to_handle_int08 equ 5
+skip_ticks_to_handle_int08 equ 2
+min_skip_upd equ 1
+max_skip_upd equ 6
+start_skip_upd equ 3 
 
 cur_mode db 0
 cur_page db 0
 handle_tick db 0
 
+on_pause db 0
+skip_update db 0
 current_game_state db 0
+
+state_continue equ 0
+state_lose equ 1
+state_win equ 2
+state_hard_leave equ 3
 
 old_int_9 	dw 0, 0
 
